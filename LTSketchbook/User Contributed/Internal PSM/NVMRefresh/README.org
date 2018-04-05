@@ -1,0 +1,677 @@
+
+PERIODIC REFRESHING NON-VOLATILE MEMORY
+---------------------------------------
+
+* AUDIENCE
+
+This README.org is intended for implementers of code that will periodically
+store NVM (EEPROM) data into Power System Management (PSM) devices to
+extend the retention of their NVM. This applies to the Controller Family
+(LTC388X) as well as the Manager Family (LTC297X), including the first
+generation of managers LTC2978/A. Also included are modules based on
+both product families.
+
+The format of the document is org mode, so that it can be used as a reference
+for coders that is searchable, but with hierarchy to make it easy to find
+things.
+
+* QUICK START
+
+This section goes straight to the chase of implementing a simple
+refresh using the code discussed below. The code is from option 9
+of the Sketch. The comments are removed, and it will be discussed
+line by line. The called functions are in file LT_NVMRefresh.h and
+.c.
+
+01:      case 9:
+02:        if (check_nvm(LTC3880_I2C_ADDRESS) && 
+03:            check_nvm(LTC2974_I2C_ADDRESS) && 
+04:            check_nvm(LTC2977_8_I2C_ADDRESS))
+05:        {
+06:          store_fault_logs();
+07:          wait_for_ready(LTC3880_I2C_ADDRESS);
+08:          wait_for_ready(LTC2974_I2C_ADDRESS);
+09:          wait_for_ready(LTC2977_8_I2C_ADDRESS);
+10:
+11:          increment_counter(LTC3880_I2C_ADDRESS);
+12:          increment_counter(LTC2974_I2C_ADDRESS);
+13:          increment_counter(LTC2977_8_I2C_ADDRESS);
+14:
+15:          smbus->sendByte(0x5B, STORE_USER_ALL);
+16:          wait_for_ready(LTC3880_I2C_ADDRESS);
+17:          wait_for_nvm_done(LTC3880_I2C_ADDRESS);
+18:          wait_for_ready(LTC2974_I2C_ADDRESS);
+19:          wait_for_ready(LTC2977_8_I2C_ADDRESS);
+20:
+21:          clear_fault_logs();
+22:          wait_for_ready(LTC3880_I2C_ADDRESS);
+23:          wait_for_ready(LTC2974_I2C_ADDRESS);
+24:          wait_for_ready(LTC2977_8_I2C_ADDRESS);
+25:
+26:          if (!check_nvm(LTC3880_I2C_ADDRESS))
+27:          {
+28:            Serial.println(F("LTC3880 failed validation"));
+29:            // Implement code to try again if CRC fails, etc.
+30:          }
+31:          if (!check_nvm(LTC2974_I2C_ADDRESS))
+32:          {
+33:            Serial.println(F("LTC2974 failed validation"));
+34:            // Implement code to try again if CRC fails, etc.
+35:
+36:          }
+37:          if (!check_nvm(LTC2977_8_I2C_ADDRESS))
+38:          {
+39:            Serial.println(F("LTC2977/8 failed validation"));
+40:            // Implement code to try again if CRC fails, etc.
+41:          }
+42:
+43:        }
+44:        Serial.println(F("NVM (EEPROM) is Updated"));
+45:        break;
+
+The prestep is to stop other threads from issuing commands on the
+I2C bus that might interfere with refresh.
+
+The first step on lines 02-04 is to check the health of the device
+to make sure things are in a good state before refreshing. This
+means no memory faults, no CRC errors, etc. If there is poor health,
+do not proceed with the refresh.
+
+The second step on lines 06-09 is to force all devices to create
+fault logs. This prevents devices from being busy due to a 
+fault that triggers a log.
+
+The third step on lines 11-13 is to increment a RAM counter that
+will be stored in NVM. This will read the current value in RAM,
+increase it by one, then store it back to RAM.
+
+The fourth step is to issue a STORE_USER_ALL command to address 0x5B
+on line 15. This will initiate a transfer from RAM to NVM for the
+entire bus, or bus segment if there are muxes. All devices will
+store in parallel.
+
+The fifth step on lines 16-19 is to wait until the operation is
+complete. This involves various forms of polling.
+
+The sixth step on line 21 is to clear the fault logs. This will remove
+faults from status registers so that the health check will not detect
+a fault from fault logs.
+
+The seventh step on lines 22-24 is to wait for the fault logs to be
+cleared.
+
+The eighth step at lines 26-41 is a recheck of the health of each device,
+and if there is a problem, try to fix the problem and try again, etc.
+
+In a nutshell:
+
+1) Check memory health
+2) Force fault log
+3) Increment the counter
+4) Store RAM to NVM
+5) Poll for complete
+6) Clear fault log
+7) Poll for complete
+8) Recheck memory health and try again necessary
+
+If you are ready to implement and don't want to read more, at least
+look at the best practices under APPLICATION ADVICE, as it talks
+about some of the "rules of the road," such as not over programming
+the devices, avoiding power failure disasters, etc.
+
+* THEORY OF OPERATION
+** INTRODUCTION
+
+This section describes the behavior of the devices wrt to storing
+data in Non Volatile Memory (NVM). NVM and EEPROM are synonymous terms
+in this document where NVM is a functional description whereas EEPROM
+is a technology description of the same PSM memory.
+
+Controllers means the LTC388X family of POL devices. Managers means the
+LTC297X family of devices. Both families have a serial interface based
+on I2C/SMBus/PMBus, which is used to perform a refresh operation.
+
+All PSM devices contain NVM data that is loaded into the RAM of the device
+at power up. The data is also transferred to RAM after software reset (Controllers
+only) or after a restore operation. In all cases, the NVM contains CRCs
+(checksums) in the NVM, and if during the transfer of NVM to RAM any of the
+CRCs do not match the data, it prevents the device from entering operation
+mode. In this state we call the device "bricked,". However, for PSM devices a 
+"brick" is a temporary state of affairs, whereas in industry this term 
+typically means some permanent and irreparable state. We can easily resolve
+the issue by reprogramming.
+
+When a device is in the bricked state, it may not respond to its assigned
+address on the I2C bus if that part depends on information contained in
+NVM to calculate the address. Controllers will be found at 0x7C, Managers
+at their default address, possibly modified by address selection pins.
+This means that repairing memory with CRC errors requires more effort
+than refreshing memory, as a refresh is not subject to any address
+problems.
+
+The purpose of refreshing NVM is to extend the time to CRC mismatch by
+reprogramming the NVM with the same data, thus avoiding this bricked
+state for a longer time. All NVM of current industrial devices on the 
+market have a finite retention time, and PSM is no different.
+
+It could be argued that a system could be allowed to run until there
+is a mismatch, and then the memory could be refreshed. While this is
+true, this may lead to disruptions in service, therefore this work
+is focused on refreshing during normal operation.
+
+Refreshing NVM is nothing more than reprogramming it with good data
+to reset the time to CRC mismatch (retention). This is a valid practice
+as long as the specifications for maximum number of writes and maximum
+temperature for store operation are not exceeded. When the maximum number 
+of writes is exceeded, the retention time will degrade, and refreshing will 
+eventually become counter productive. Refreshing while exceeding the
+temperature specification may result in a shorter time to CRC error
+than not refreshing.
+
+There are two device mechanisms for putting data into NVM:
+
+1) Transfer data in RAM to NVM (STORE_USER_ALL)
+2) Transfer data from I2C commands to NVM (MFR_EE_DATA)
+
+All devices can transfer data from RAM to NVM. This has the advantage 
+that the data required is in the device itself. When a device is powered
+on, the data is transferred from NVM to RAM, therefore it can be transferred
+back to NVM with a simple command. The downside of using data in the 
+devices is that it may have been modified by firmware. This is rarely the
+case in practice, as most firmware only reads telemetry. However, in a few cases
+the voltage of a rail may be adjusted and the refresh will have to
+temporarily move the voltage to the default state during the refresh.
+
+All devices except LTC2978/A can transfer data via I2C to NVM directly. This 
+offers some advanced techniques that will be discussed, but are not required.
+The main motivation behind a direct transfer would be survival of a 
+power outage occurring during a transfer from RAM to NVM. Loosing power
+during a RAM to NVM operation results in a CRC error, which means
+the device/s will not enter the operating state, and the RAM contents
+are no long valid for refresh. Therefore, an outside operation is required.
+
+Even though the LTC2978/A does not support I2C to NVM operations, it can
+be programmed externally. This is done by moving data via I2C to RAM,
+then transferring the RAM to NVM. In this case, more care is required
+because when the data is sent to RAM, the device operates on the data.
+This means order that RAM locations (commands) are written is important.
+
+** WHAT CAN GO WRONG
+
+There are two main concerns related to transferring data from RAM to NVM
+that must be addressed:
+
+1) Power could be lost during the transfer resulting in a CRC mismatch
+2) Firmware could modify the RAM so that a transfer changes the NVM data
+
+Item one may be addressed by creating favorable probabilities. Power
+outages are rare events in industrial systems, and the time required to
+program is extremely small. However, to minimize the probability and impact
+of a power outage, all that is required is to refresh systems at different
+times of the day, so that if there is an outage, only one unit fails.
+
+The second item is addressed by you, the coder, to ensure that what is in 
+RAM is "good to go." Very few firmware designs modify settings during
+operation, so this is typically not a problem. One potential problem
+though is VID (Voltage Identification). If the firmware is implementing 
+VID, the voltage is changed during operation or at boot time and
+if data is transferred from RAM to NVM, on the next power cycle, the 
+voltage may be incorrect.
+
+Typically, the starting VID value is the largest voltage, and in this state,
+the system is safe, but less efficient. The Firmware should move the system
+to this state, transfer to NVM, then move the system back to the operating
+state. This will ensure the NVM contains the settings required for a power
+cycle.
+
+These same principles apply to any other firmware operation that modifies
+the operating state during operation or at boot time.
+
+** WHAT WILL GO RIGHT
+
+If the NVM is refreshed, the retention will be extended beyond the 
+specification, increasing the life of your product, reducing returns, 
+thus reducing the typical small ppm failure rate to an even smaller
+ppm failure rate.
+
+These techniques can be included in base firmware and reused on all future 
+designs, because all PSM products use the same commands and techniques.
+
+** NEW DESIGNS
+
+LTC recommends using LTC2977 rather than LTC2978/A on all future designs.
+The LTC2977, a second generation manager, has features that make it
+more compatible with the other PSM devices such as:
+
+- Direct I2C to NVM support
+- More uniform register definition
+- Consistent polling behavior
+
+* APPLICATION ADVICE
+** INTRODUCTION
+
+The provided code demonstrates all the techniques required to safely
+transfer data from RAM to NVM. This code involves techniques to ensure
+robust operation of a critical function which must not fail or a device
+may be left in an incorrect or bricked state.
+
+Because this code is likely to be incorporated into an existing design,
+it is advised to NOT replace existing polling mechanisms used by
+older code with new ones, and instead use the example polling methods
+for refreshing memory. New designs that will have a fuller validation 
+can use the example polling code for a whole firmware design.
+
+** GENERAL BEST PRACTICES
+
+The best practice for implementing refresh is:
+
+A) Create a refresh interval that is modifiable and in the range of
+   1 month to 1 year. Consult with LTC Design Engineers for the
+   most appropriate interval for your situation.
+
+B) Use a refresh counter that is stored in the NVM of each device. Use
+   the counter to prevent over programming.
+
+C) Stagger refresh time using a random number generator seeded by
+   some hardware value such as reboot time. The times should be 
+   separated by at least 10 seconds. The staggering is between
+   serviceable units, not between devices within a single unit.
+
+D) When a unit is refreshed, store all NVM data with a global command
+   to reduce the total time, and thus reduce the probability of
+   power outage occuring during a write. 
+
+E) Firmware should establish the health of the devices before programming
+   to avoid storage of bad data. If the health is bad, reschedule 
+   the operation, possibly to be after the next power cycle. In this 
+   context "health" means absence of errors found in status registers.
+
+F) Firmware should test the health of NVM after refresh where possible
+   and refresh again until successful, but avoid wearing out the NVM.
+   It is better to return a serviceable unit to the factory than 
+   wear out NVM. Consult the data sheet and LTC Design Engineers
+   for further advice. In this context, "health" means absence
+   of CRC mismatches, which leads to failures after reset or a
+   power cycle.
+
+G) Use polling everywhere to ensure all commands complete before
+   issuing a new command.
+
+H) Handle I2C errors; do not swallow them and continue on. If you must
+   swallow I2C errors, test, test, test, test... Consider running the
+   I2C clock at 100KHz to give more timing margin and allow devices more
+   processing time. The actual exposure to power failure time will
+   not be reduced because it is triggered by one command at its
+   STOP bit.
+
+I) Use Packet Error Checking (PEC). This means enabling mandatory
+   PEC on PSM devices, and checking CRC/PEC values on all read
+   operations. If a write to the device fails, there will be 
+   a CML fault that should be detected, and if a read calculates
+   a CRC/PEC mismatch, the firmware should retry, abort, etc.
+
+J) Try again if there is a failure, but don't wear out the NVM.
+
+K) Force fault logs to store to reduce the probability of a device
+   becoming busy between a successful poll and the next command.
+
+L) Firmware should measure die temperature before transferring data
+   from  RAM to NVM and should not perform the transfer if greater 
+   than 85deg C. If a given system is always over 85deg C, consult 
+   with LTC design to assess the impact for the particular situation.
+
+** BEST PRACTICE RECIPE
+
+The following is a typical refresh recipe:
+
+1) Timer operation determines it is time for refresh or
+   a command comes from outside the system
+2) Lock out a power cycle or warn operators with an indicator
+3) Schedule the refresh with some random time data
+4) Check the health of RAM to ensure there are no errors
+5) Force a fault log to prevent busy
+6) Modify the operating parameters if required (default VID value)
+7) Update the refresh counter in the RAM of the device
+8) Issue a global store command with polling
+9) Clear the fault logs so a fault can trigger a real log 
+10) Check the health of NVM and if there is a CRC error
+    attempt to refresh again so a power cycle will not 
+    cause a failure or brick, keeping track of programming
+    count to protect against wearout
+11) Notify operators if a failure cannot be resolved so 
+    that the unit can be scheduled for replacement before
+    the next power cycle to avoid a failed power up
+
+** EXTENDED BEST PRACTICE
+
+Note: Optional means optional. Don't think that because it is
+      discussed here, it must be important. It is only for
+      completeness and for long term product planning, etc.
+
+An optional extension is to use the direct I2C command to NVM
+capability of the non LTC2978/A devices to store the NVM data
+in the CPU RAM or an EEPROM (not in PSM device). This means
+the Board Management Controller (BMC) reads the NVM via I2C
+and stores it outside the PSM device.
+
+If the data is stored in CPU RAM, it can be used for a second
+refresh attempt as an alternate to the RAM in the PSM device.
+It also can work around any firmware that might modify the RAM
+of a PSM device by refreshing with an exact copy of NVM (read NVM.
+write NVM). For example, at boot the NVM is read before any 
+other firmware operation, and stored. If the firmware modifies any
+parameters before the refresh, the refresh will not be affected
+because it is using a copy made before operation.
+
+If the data is stored in an EEPROM, and if (if and only if) the
+CPU, typically a Board Management Controller (BMC), has power even
+when the PSM devices cannot turn on their outputs, this data can
+be written to NVM to recover the system. This is like storing data in 
+CPU RAM, except it can survive a power cycle. Furthermore, the 
+"golden copy" can be made during the manufacturing process, rather
+than at boot time.
+
+However, unbricking devices so that they can be reprogrammed
+is complicated, and therefore LTC does not recommend this practice.
+The NVM data that is stored in EEPROM is better used for refreshing
+NVM than fixing bricks.
+
+The real purpose of storing NVM data in CPU RAM or external EEPROM
+is to make the system immune to changes to the RAM of the PSM
+devices during operation. Choice of CPU RAM or external EEPROM
+is really a matter of when the "golden copy" is made. Is it made
+during manufacturing, or at boot time?
+
+That said, if you desire firmware to reprogram bricked devices in the 
+field, what you really want is the LTC In System Programming code
+that applies data exported by LTpowerPlay. This code is sometimes
+called In Flight Update when used with devices that support
+direct I2C to NVM commands, because it can program a live system
+without interruption. This use-case (In Flight Update) is about 
+remote update, not fixing bricked systems. The code that performs
+In System Programming is basically the same as used by LTpowerPlay, 
+LTC Manufacturing, or BP Micro.
+
+The advantage of this code is that it is a simple engine that applies
+a recipe generated by LTpowerPlay. This means LTC takes responsibility
+for the recipe (algorithm) that can program a system in any state, 
+including bricked devices.
+
+The key to success with In System Programming is:
+
+1) Best with second generation parts (not LTC2978/A) that support
+   direct to NVM transfers
+2) The BMC power does not rely on PSM devices it is programming
+3) PSM devices have Logic power that does not depend on PSM devices
+   the BMC is programming
+
+** FINAL ADVICE
+
+The most universal solution is to use the BEST PRACTICE RECIPE, without 
+extension. The probability of failure of this recipe is in the very 
+low ppm. The extended best practice of reading NVM directly or using
+In System Programming is presented for completeness, and for consideration
+for new designs. Extension is not required for extending retention.
+
+* CODE CODE CODE
+** SCOPE
+
+The code covers transferring RAM to NVM, and direct read/write
+of NVM data via I2C, including checking the CRC of the data in NVM.
+
+The code does not cover In System Programming or In Flight Update.
+
+** FILE ORGANIZATION
+
+The code is delivered in two forms:
+
+1) Minimum files required for learning
+2) Full Linduino Sketchbook
+
+There are two types of files:
+
+A) Application (Sketches)
+B) Library (PMBus, Refresh)
+
+Application files are three, called NVMRefresh.ino, NVMRefresh2.ino,
+NVMRefresh3.ino, and NVMREfresh4.ino which are Linduino Sketches for
+different DC boards to cover various PSM devices.
+
+The library files come from two libraries:
+
+a) LT_SMBus
+b) LT_NVMRefresh
+
+The LT_NVMRefresh library contains the main refresh code, which has been
+desugared such that it only makes use of the SMBus API (No PMBus API). 
+It also duplicates the poll on ACK function so that it only uses SMBus
+API such as ReadWord, WriteByte, etc.
+
+** PURPOSE
+
+The purpose of the code is to enable three things: study of the code
+to learn how to refresh, running the examples so you can spy on the 
+I2C bus with a Beagle or other tool and watch the transactions, and it
+enables testing the code.
+
+** FUNCTION GROUPS
+
+There are 21 functions, documented in file LT_NVMRefresh.h, grouped
+here to help find what you are looking for. Commentary continues after
+the commands.
+
+*** Storers
+
+    void store();
+
+*** Pollers
+
+    uint8_t wait_for_ack(uint8_t address, uint8_t command);
+    uint8_t wait_for_not_busy(uint8_t address);
+    uint8_t wait_for_nvm_done(uint8_t address);
+    void wait_for_ready(uint8_t address);
+
+*** Helpers
+
+    bool is_ltc297x(uint8_t address);
+    bool is_ltc2977(uint8_t address);
+    bool is_ltc2978(uint8_t address);
+    bool check_health(uint8_t address);
+    float readItemp2977_8(uint8_t address);
+    float readItemp(uint8_t address);
+    void increment_counter(uint8_t address);
+    void store_fault_logs();
+    void clear_fault_logs();
+    void clear_faults_global(void);
+
+*** NVM Commanders (Extended Best Practice)
+
+    void lock_nvm(uint8_t address);
+    void unlock_nvm(uint8_t address);
+    void nvm_lock_reset(uint8_t address);
+    bool check_nvm_data_checksum(uint8_t address);
+    void read_bytes(uint8_t address, uint16_t **data, uint16_t *count);
+    void write_bytes(uint8_t address, uint16_t **data, uint16_t *count);
+
+** FUNCTION DESCRIPTIONS
+
+Following the best practice without extensions means using Storers,
+Pollers, and Helpers. Notice that Storers is a single call to store(),
+whereas NVM Commanders has 6 commands and some C pointers. My point,
+tongue in cheek, is that best practice is a simpler approach and you
+can safely ignore NVM Commanders unless you have special reasons,
+or you just love more work.
+
+*** Storers
+
+The single call to store() issues a STORE_USER_ALL command which begins
+a transfer from RAM to NVM. This command is issued to address 0x5B, 
+a global address, so that all devices begin transfer simultaneously.
+
+All devices will become busy during the process. Therefore, it is a 
+good idea, if any other threads are running, to put them on hold
+until the store completes.
+
+The system firmware knows when everything is complete by polling, 
+which is found in Pollers.
+
+*** Pollers
+
+Polling is in three forms:
+
+1) Wait until a device ACKs a command, meaning it can listen
+2) Wait until a device is not busy, meaning it can listen and act
+3) Wait until background EEPROM operations are complete (LTC388X only)
+
+Note that LTC297X devices are busy until RAM is completely transferred
+to NVM, but LTC388X devices will be busy while the process is setup,
+and then will begin a background process to complete, so it will not
+be busy. However, to ensure all commands sent to a LTC388X device
+are executed in order, it is best if only one command enters the 
+command pipeline at a time. The best way to ensure this is to poll until
+the transfer is complete, so that following commands are executed faster
+and the likelihood of multiple commands in the queue is minimized.
+
+Out of order execution is rarely a problem in practice, because most
+firmware is reading telemetry. Even in control situations, there
+are very few cases of concern. So you can skip polling until complete
+for LTC388X, unless you want to be more conservative. Note,
+do not do a retry of refresh while the NVM is writing in the background.
+
+Even so, if firmware is keeping track of success of programming,
+polling until the operation is complete makes the tracking more
+accurate and closes holes in the logic. Chance of failure is very
+small, but complete is complete by definition.
+
+The main polling function is:
+
+    void wait_for_ready(uint8_t address);
+
+The wait_for_ready() function is an intelligent poll that is aware
+of the device type and just "does the right thing." The goal is to
+have a way of polling that does not require conditional code by
+device type.
+
+The wait_for_nvm_done() function is used for the mentioned case of
+waiting for a controller to finish background processing. Using
+this function means using conditional code. So if you need very
+generic code, you can use wait_for_ready() instead, as long as you
+accept that code will keep executing while writing NVM at the same
+time.
+
+*** Helpers
+
+Helpers are just common functions that probably already exist
+in your firmware. However, a few things may not be obvious.
+The function is_ltc2978 plays a trick with a reserved bit
+to determine if a device is a LTC2978/A. Its purpose is to work
+around an errata where it is possible to modify MFR_SPECIAL_ID 
+of these devices, so it is not reliable for determination. It is
+important to know if a device is a LTC2978/A because it does 
+not have a BUSY bit, and polling on it could lock up firmware
+if there is no timeout on the poll, or just cause a performance
+problem when there is a timeout.
+
+If you are tempted to use your own polling, please study these
+and prove to yourself your existing polling is as good as what
+is provided here.
+
+The read temperature helpers are important because the command
+code for internal temperature for the controllers and managers
+are different. The firmware must use the internal die temperature
+as it is used to determine health. The hotter the die temperature
+the less the retention. However, the main thing is not to exceed
+the specification during programming.
+
+If you have your own temperature functions, be sure they use the
+proper command codes so the value used is INTERNAL temperature.
+
+The counter increment function is device type aware like the polling.
+Not all devices have the same user registers for user data.
+
+*** NVM Commanders
+
+Because direct access to NVM is something that should never occur by
+accident, it has a lock. Once unlocked, NVM can be read/written
+as a block of data directly. A check function is provided to double 
+check that what was written matched the data used. More important
+is the check_nvm_checksum() function that reads the data and compares
+the checksum. Even when not using the direct calls to refresh,
+check_nvm_checksum() is a useful way to prove that the data in NVM
+is error free, and that at the next reset or power cycle the system
+will power up properly.
+
+If you use the read/write commands, note that they require significant
+memory to hold the data unless they are rewritten in an incremental way,
+such as reading to EEPROM or writing to EEPROM. NVM can be over 128 bytes
+and on very small micro-controllers this can be a problem. If the only need
+is the CRC check, this can be done incrementally because CRC is calculated
+on each 32 bytes of data. Therefore, if not using the extended methods,
+32 bytes is enough space.
+
+** SKETCHES
+
+There are three sketches for DC1613A/C, DC2198A, and DC2174A-B, DC2023A 
+to cover:
+
+LTC3880
+LTC2974
+LTC2977
+LTC2978/A
+LTC2980
+LTC3882
+LTM2987
+
+When a sketch is run, it gives a menu:
+
+//********************************************************************
+//* DC1962C Store/Restore User All                                   *
+//*                                                                  *
+//* This program demonstrates how to store and restore EEPROM.       *
+//*                                                                  *
+//* Set the baud rate to 115200 and select the newline terminator.   *
+//*                                                                  *
+//********************************************************************
+
+  1 -Check NVM (EEPROM) is Ok to Program
+  2 -Force Fault Logs
+  3 -Increment Counter
+  4 -Bulk Read NVM (EEPROM)
+  5 -Bulk Write NVM (EEPROM)
+  6 -Store
+  7 -Clear/Erase Fault Logs
+  8 -Clear Faults
+  9 -Bus Probe
+ 10 -Reset (Will Power Cycle)
+ 11 -Example "In System" Safe Store
+
+Enter a command:
+
+The last item 11 demonstrates what is discussed in the quick start.
+The other items demonstrate individual functions, so you can study
+their behavior individually.
+
+* RECAP
+
+Refreshing NVM of PSM devices is not complicated. One command
+STORE_USER_ALL is at the center of attention. This single command
+transfers RAM data to NVM which extends the retention.
+
+However, some best practices should be used, such as checking 
+health first, polling, avoiding over programming, and adding some
+random data to the schedule to prevent all boards from storing
+at exactly the same time.
+
+The devil is in the details, so there is working code as a reference.
+When in doubt, look at the code, as it has been vetted, reviewed,
+and tested with hardware.
+
+If you have any questions, the author of the code can be contacted at:
+
+Michael Jones
+Applications Section Head
+Colorado Design Center
+Linear Technology
+950 Chapel Hills Drive
+719-659-8524 (cell)
+mjones@linear.com

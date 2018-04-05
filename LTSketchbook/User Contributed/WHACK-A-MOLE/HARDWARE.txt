@@ -1,0 +1,48 @@
+The DC2313 board might be sufficient for the center of the game. We
+might want 2 LTC2937s to control 12 sequence positions (?). Or 12
+might be too many. 9 might be good, in a 3x3 grid. 
+
+It needs a Linduino controller, but probably not a PC to talk to the
+Lindino, just a few buttons and lights for the Linduino to talk to the
+player. These lights and buttons belong on the main board with all
+other buttons. We should be able to display the electronics separately
+from the game board itself.
+
+The big pushbuttons each have built-in lights, but we need some kind
+of driver to buffer each enable signal and provide power to each LED. 
+
+Probably want a separate "GO" pushbutton to begin play. This one can
+be connected to the Linduino, or to the ON pin of the LTC2937. If it
+is connected to the '37 then the linduino will need to poll the on
+state of the part, and might not be as robust. Connecting the button
+to the ADC input on the Linduino allows the Linduino to control the
+'37 more deterministically.
+
+Tricks will be needed to get the LTC2937 to control the buttons and
+lights in an entertaining manner. Normally, the light would come on
+when enabled, and stay on if the user hit the button in time (no fault). 
+If we want the light to go off, or blink when the user hits the button
+successfully, then we need to command the LTC2937 to do something
+unusual, or we need extra circuitry between the '37 and the light. 
+
+We only want sequence faults, not supervisor faults. Turn-off
+superisor faults entirely. That way when a putton is pressed it allows
+the sequence to continue, but the subsequent UV condition as the
+button is released is ignored.
+
+Blinking the LEDs can be done with the asynchronous channel feature,
+even during sequencing (while paused at breakpoints). It seems to be
+OK to cross the "zero boundary" while paused at a breakpoint. We could
+use this to turn-off LEDs that get whacked successfully. 
+It may be desirable to use an additional controller to blink additional LEDs, or
+to have some kind of OR function to control the each LED from two
+separate controllers, one sequenced, and one free-wheeling.
+
+Use a soft mallet to whack the buttons. Maybe Nerf, or inflatable. 
+
+Need a way to play sounds on command. The Linduino might be busy, so
+it would be nice to have a separate circuit that can generate sounds
+on I2C commands, or with some GPIO signal from the Linduino. If we had
+a DAC board we could send audio samples to it over I2C. If we had a
+sound recording chip (ISD1916), we could record our own sounds and
+play them back through a loudspeaker. Probably need an amplifier.

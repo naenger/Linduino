@@ -1,0 +1,284 @@
+/*
+LTC2970: Dual I2C Power Supply Monitor and Margining Controller
+
+Oil Bath Temperature Sense Board 8x LTC2970s with External BJT
+This sketch reports temperature at each BJT
+Requires that the IDAC is not terminated with a resistor to GND
+Requires that the BJT be installed with force and sense lines separate
+
+@verbatim
+
+NOTES
+  Setup:
+   Set the terminal baud rate to 115200 and select the newline terminator.
+
+@endverbatim
+
+http://www.linear.com/product/LTC2970
+http://www.linear.com/demo/DC980A
+
+REVISION HISTORY
+$Revision:  $
+$Date:  $
+
+Copyright (c) 2014, Linear Technology Corp.(LTC)
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of Linear Technology Corp.
+
+The Linear Technology Linduino is not affiliated with the official Arduino team.
+However, the Linduino is only possible because of the Arduino team's commitment
+to the open-source community.  Please, visit http://www.arduino.cc and
+http://store.arduino.cc , and consider a purchase that will help fund their
+ongoing work.
+*/
+
+/*! @file
+    @ingroup LTC2970
+*/
+
+#include <math.h>
+#include <Arduino.h>
+#include <stdint.h>
+#include "Linduino.h"
+#include "UserInterface.h"
+#include "LT_SMBusNoPec.h"
+#include "LTC2970.h"
+
+/****************************************************************************/
+// Global variables
+uint8_t ltc2970_i2c_address[8];
+
+static LT_SMBusNoPec *smbus = new LT_SMBusNoPec();
+
+
+// Values for the external temperature sensor routine
+static uint16_t dac_current_low = 0x0714;
+static uint16_t dac_current_high = 0x07FF;
+
+//float bjt_n[8]; // = 1.016;
+
+int meas_delay = 350; //number of milliseconds to wait for voltage settling between set and measure
+
+//! Circular buffers for running averages
+const int count = 40; // number of samples to average over
+const int num_dev = 1; // number of LTC2970 devices on the bus
+//const int dither[8] = {0,1,-2,1,0,-1,2,-1};
+//const int dither[10] = {0,1,-2,1,-1,0,-1,2,-1,1};
+const int dither[40] = {0,1,-2,1,-1,0,-1,2,-1,1,0,1,-2,1,-1,0,-1,2,-1,1,0,1,-2,1,-1,0,-1,2,-1,1,0,1,-2,1,-1,0,-1,2,-1,1};
+//const int dither[40] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+// multi-dimentional arrays are [device][count]
+float current_high[num_dev][count];
+float current_low[num_dev][count];
+float current_high_accum[num_dev];
+float current_low_accum[num_dev];
+float vbe_high[num_dev][count];
+float vbe_low[num_dev][count];
+float vbe_high_accum[num_dev];
+float vbe_low_accum[num_dev];
+int ptr;
+
+
+static float q_by_k = 11.60452e3;
+
+/****************************************************************************/
+//! Initialize Linduino
+void setup()
+{
+  uint16_t return_val;
+  int i,j;
+  
+  Serial.begin(115200);         //! Initialize the serial port to the PC
+
+  // define individual chip addresses
+  ltc2970_i2c_address[0] = 0x5C;
+  ltc2970_i2c_address[1] = 0x5D;
+  ltc2970_i2c_address[2] = 0x5E;
+  ltc2970_i2c_address[3] = 0x5F;
+  ltc2970_i2c_address[4] = 0x6B;
+  ltc2970_i2c_address[5] = 0x6C;
+  ltc2970_i2c_address[6] = 0x6D;
+  ltc2970_i2c_address[7] = 0x6E;
+
+  // initialize the individual device arrays
+  for(i = 0; i < num_dev; i++) {
+    ltc2970_configure(ltc2970_i2c_address[i]);
+    //! Initialize the DAC
+    smbus->writeWord(ltc2970_i2c_address[i], LTC2970_CH1_A_IDAC, 0x0700);
+    //    bjt_n[i] = 1.016;
+    vbe_low_accum[i] = 0.0;
+    vbe_high_accum[i] = 0.0;
+    current_low_accum[i] = 0.0;
+    current_high_accum[i] = 0.0;
+
+    // initialize the circular buffers and accumulators
+    for(j = 0; j < count; j++) {
+    current_high[i][j] = 0.0;
+    current_low[i][j] = 0.0;
+    vbe_high[i][j] = 0.0;
+    vbe_low[i][j] = 0.0;
+    }
+  }
+
+  ptr = 0;
+
+  print_title();
+  Serial.println(F("\n****INITIALIZING THE LTC2970****\n"));
+  Serial.println(F("EXT_TEMP[0],EXT_TEMP[1],EXT_TEMP[2],EXT_TEMP[3],EXT_TEMP[4],EXT_TEMP[5]],EXT_TEMP[6],EXT_TEMP[7],"));
+  delay(meas_delay);
+}
+
+
+//! This loop takes no user input
+//! It simply maintains a running average of measured Vbe and I values, and prints-out a new
+//!   temperature reading at every measurement
+//! Expect the first N readings to be noisy while the running averages are accumulating
+void loop()
+{
+  uint16_t reg_val;
+
+  int device; // count the number of LTC2970s on the bus
+
+  float q_by_n_k;
+
+  float vbe_delta, current_ratio, ln_current_ratio, ext_temp;
+  
+  for (device = 0; device < num_dev; device++) {
+    //    q_by_n_k = (q_by_k / bjt_n[device]);
+    q_by_n_k = q_by_k / 1.016;
+    //! Measure voltage and current at low current
+    smbus->writeWord(ltc2970_i2c_address[device], LTC2970_CH1_A_IDAC, (dac_current_low+dither[ptr]));
+    delay(meas_delay);
+    reg_val =
+      (0x7FFF & smbus->readWord(ltc2970_i2c_address[device], LTC2970_CH1_A_ADC));
+    vbe_low_accum[device] -= vbe_low[device][ptr];
+    vbe_low[device][ptr] = ((float)(reg_val & 0x7FFF))*500e-6;
+    vbe_low_accum[device] += vbe_low[device][ptr];
+    //    Serial.print(F("vbe_low_accum = "));
+    //    Serial.println(vbe_low_accum[device]);
+
+    reg_val =
+      (0x7FFF & smbus->readWord(ltc2970_i2c_address[device], LTC2970_CH1_B_ADC));
+    current_low_accum[device] -= current_low[device][ptr];
+    current_low[device][ptr] = ((float)(reg_val & 0x7FFF))*500e-6;
+    current_low_accum[device] += current_low[device][ptr];
+    //    Serial.print(F("current_low_accum = "));
+    //    Serial.println(current_low_accum[device]);
+
+    //! Measure voltage and current at high current
+    smbus->writeWord(ltc2970_i2c_address[device], LTC2970_CH1_A_IDAC, (dac_current_high+dither[ptr]));
+    delay(meas_delay);
+    reg_val =
+      (0x7FFF & smbus->readWord(ltc2970_i2c_address[device], LTC2970_CH1_A_ADC));
+    vbe_high_accum[device] -= vbe_high[device][ptr];
+    vbe_high[device][ptr] = ((float)(reg_val & 0x7FFF))*500e-6;
+    vbe_high_accum[device] += vbe_high[device][ptr];
+    //    Serial.print(F("vbe_high_accum = "));
+    //    Serial.println(vbe_low_accum[device]);
+
+    reg_val =
+      (0x7FFF & smbus->readWord(ltc2970_i2c_address[device], LTC2970_CH1_B_ADC));
+    current_high_accum[device] -= current_high[device][ptr];
+    current_high[device][ptr] = ((float)(reg_val & 0x7FFF))*500e-6;
+    current_high_accum[device] += current_high[device][ptr];
+    //    Serial.print(F("current_high_accum = "));
+    //    Serial.println(current_high_accum[device]);
+
+    vbe_delta = (vbe_high_accum[device] - vbe_low_accum[device]) / count;
+    //    Serial.print(F("vbe_delta = "));
+    //    Serial.println(vbe_delta);
+    current_ratio = current_high_accum[device] / current_low_accum[device];
+    //    Serial.print(F("current_ratio = "));
+    //    Serial.println(current_ratio);
+    ln_current_ratio = log(current_ratio); // natural log
+    //    Serial.print(F("ln_current_ratio = "));
+    //    Serial.println(ln_current_ratio);
+	//vbe_delta = (vbe_high[device][ptr] - vbe_low[device][ptr]);
+	//    current_ratio = current_high[device][ptr] / current_low[device][ptr];
+	//ln_current_ratio = log(current_ratio); // natural log
+
+    ext_temp = (vbe_delta * q_by_n_k / ln_current_ratio) - 273.15;
+    Serial.print(ext_temp);
+    Serial.print(F(","));
+  }
+  Serial.print(F("\n"));
+
+  //! update the circular buffer pointer
+  //  Serial.print(F("ptr = "));
+  //  Serial.println(ptr);
+  ++ptr;
+  ptr = (ptr >= count) ? 0 : ptr;
+
+}
+
+
+/************************************************************************/
+// Function Definitions
+
+//! Prints the title block when program first starts.
+void print_title()
+{
+  Serial.print(F("\n***************************************************************\n"));
+  Serial.print(F("* LTC2970 Temperature Measurement Program                       *\n"));
+  Serial.print(F("*                                                               *\n"));
+  Serial.print(F("* This program provides a simple interface to measure           *\n"));
+  Serial.print(F("* temperature using a BJT connected to the LTC2970              *\n"));
+  Serial.print(F("*                                                               *\n"));
+  Serial.print(F("* Set the baud rate to 115200 and select the newline terminator.*\n"));
+  Serial.print(F("*                                                               *\n"));
+  Serial.print(F("*****************************************************************\n"));
+  Serial.println(F("\n"));
+}
+
+
+//! Writes configuration values to the LTC2970 registers
+void ltc2970_configure(uint8_t local_i2c_address)
+{
+  uint16_t return_val;
+  //start the 2970 by configuring all of its registers for this application
+  // use SMbus commands
+  smbus->writeWord(local_i2c_address, LTC2970_FAULT_EN, 0x0168);
+  smbus->writeWord(local_i2c_address, LTC2970_IO, 0x000A);
+  smbus->writeWord(local_i2c_address, LTC2970_ADC_MON, 0x007F);
+  smbus->writeWord(local_i2c_address, LTC2970_VDD_OV, 0x2CEC);
+  smbus->writeWord(local_i2c_address, LTC2970_VDD_UV, 0x2328);
+  smbus->writeWord(local_i2c_address, LTC2970_V12_OV, 0x3FFF);
+  smbus->writeWord(local_i2c_address, LTC2970_V12_UV, 0x00000);
+
+  smbus->writeWord(local_i2c_address, LTC2970_CH1_A_OV, 0x2AF8);
+  smbus->writeWord(local_i2c_address, LTC2970_CH1_A_UV, 0x2328);
+  smbus->writeWord(local_i2c_address, LTC2970_CH1_A_SERVO, 0x0000);
+  smbus->writeWord(local_i2c_address, LTC2970_CH1_A_IDAC, 0x0700);
+
+  smbus->writeWord(local_i2c_address, LTC2970_CH1_B_OV, 0x3FFF);
+  smbus->writeWord(local_i2c_address, LTC2970_CH1_B_UV, 0x0000);
+
+  smbus->writeWord(local_i2c_address, LTC2970_CH0_A_OV, 0x1C5D);
+  smbus->writeWord(local_i2c_address, LTC2970_CH0_A_UV, 0x1770);
+  smbus->writeWord(local_i2c_address, LTC2970_CH0_A_SERVO, 0x0000);
+  smbus->writeWord(local_i2c_address, LTC2970_CH0_A_IDAC, 0x0084);
+  smbus->writeWord(local_i2c_address, LTC2970_CH0_B_OV, 0x3FFF);
+  smbus->writeWord(local_i2c_address, LTC2970_CH0_B_UV, 0x0000);
+}

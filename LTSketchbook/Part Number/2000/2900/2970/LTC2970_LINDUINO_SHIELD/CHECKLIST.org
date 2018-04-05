@@ -1,0 +1,87 @@
+* BOARD ITEMS
+** QUESTIONS
+*** should sense resistor be larger to sense finer than 25 mA steps (500uV/0.02)?
+*** is Linduino pulling ALERTB? Why?
+    - ALERTB is the IO pin
+***  can we add a diode-OR to the power supply 
+**** so that the 2970 can draw power from either the Linduino +5v or from the +12V plug?
+**** of course, this might make no sense since this is a Linduino shield, and the LTC2970 is useless without the Linduino
+*** need to figure-out how to tell the Linduino to program the EEPROM; this is for when the Linduino is a DC590 emulator
+*** new servo resistor value for larger servo range? 
+**** With 100k the whole range is +/-10% REVIEW
+*** should the I2C bus pull-up to 3.3v instead of 5v?
+    
+    
+** REVIEW
+*** are all footprints correct?
+*** feedback loop stable?
+**** test with load pulse
+*** transistors not over-voltage
+**** LED drivers
+*** input caps correct type and magnitude
+*** output caps correct size and magnitude
+*** board silk screen correct
+**** DC number
+**** LTC logo and phone number
+**** turrets correctly labeled
+**** jumpers correctly labeled
+**** LEDs correctly labeled
+     
+* CODE ITEMS
+** Linduino
+*** butterworth filter is probably the best, not running average (memory footprint)
+*** why 350ms delay? 
+**** use a scope to trigget on the I2C command that initiates the IDAC change
+**** measure settling time
+**** is the 350ms mostly analog settling, or IDAC lag, or ADC loop?
+***** ADC loop should take < 33.3ms for one register to update
+*** write the loop so it toggles between HIGH and LOW current, taking measurements each toggle
+**** this would eliminate half of the delay
+** LTpowerPlay?
+*** modified DC590 sketch
+*** is there any way that LTPP can understand external temperature? -- probably not
+** REVIEW
+*** is all text clean (menus, reporting, messages,...)?
+*** any missing features?
+*** remove all useless commented code
+*** all alerts and warnings in place
+*** all alerts and warnings at correct voltage
+*** change temperature algorithm to match latest code
+* SPECS TO VERIFY/CHARACTERIZE
+** voltage tolerance, no servo
+*** resistor -induce error
+*** other sources of voltage error?
+** servo voltage range
+*** high
+*** low
+*** servo precision (1-LSB step size)
+*** servo accuracy 
+**** INL
+**** DNL
+** current limitations
+*** inductor
+*** LTC3604
+*** board
+*** anything too hot at max current?
+** output voltage waveform clean
+*** light load
+*** medium load
+*** heavy load
+** PGOOD function
+*** as advertised
+** LEDs
+*** PGOOD
+*** VDD_5V
+*** GPIO_0
+*** GPIO_1
+* DOCUMENTATION
+** DEMO MANUAL?
+** TEST PLAN?
+** SUGGESTED USE MODEL?
+
+* TABLE
+| foo                  | bar           | baz               |
+| more foo             | more bar      | much baz          |
+| lots and lots of foo | very much bar | a whole lotta baz |
+|                      |               |                   |
+|                      |               |                   |

@@ -1,0 +1,12 @@
+* SAR 
+** one SAR search takes 92.6ms
+*** 2 I2C reads for set-up (512us each)
+*** 1 I2C write for set-up (400us)
+*** 8 I2C writes (400us each)
+*** 8 I2C reads (512us each)
+*** 8 settling times (10ms each)
+*** 2 I2C writes for restore (512us each)
+*** computation overhead
+*** the result is immediately available after the last read and some computation time
+
+

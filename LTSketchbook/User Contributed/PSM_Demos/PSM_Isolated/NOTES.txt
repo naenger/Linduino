@@ -1,0 +1,21 @@
+First wrote "data-sweep.ino" to collect efficiency curves. The user must
+manually adjust the load current and press any key to run a set of
+curves as the Linduino steps IBC voltage and measures efficiency. This
+sketch prints CSV data to the serial terminal.
+
+Next wrote "efficiency-search.ino" to use the same routines to sweep
+the IBC voltage and search for the efficiency peak voltage, then set
+it at the most efficient voltage. The user sets the load current and
+triggrs the search. This sketch prints to the serial terminal.
+
+efficiency-search-LCD.ino has the same idea but it uses an LCD screen
+to display the search. This has two potential advandages. First there
+is the self-contained aspect: not requiring any PC hook-up. Second is
+the ability to run without power from the PC, which may or may not
+make noise worse.
+
+I needed to modify the libraries/LTC2945/LTC2945.cpp and
+libraries/LTC2945/LTC2945.h, as well as (I think)
+libraries/LT_PMBUS/LT_Wire.h to make averything talk nicely together
+(PMBus and I2C parts). Also, the Adafruit RGB chield needed some
+modifications to be able to play nicely on the I2C bus. 
